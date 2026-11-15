@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "ClassroomGroup": {
+      "title": "ClassroomGroup",
+      "description": "Shared classroom board state (theory notes, title, group label, and Gemini-generated infographic image) for a discussion group.",
+      "type": "object",
+      "properties": {
+        "groupNumber": {
+          "type": "integer",
+          "description": "Discussion group number (1, 2, 4, or 5)"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Infographic title entered by the group"
+        },
+        "groupInput": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Group label shown in the framed footer"
+        },
+        "theoryText": {
+          "type": "string",
+          "maxLength": 15000,
+          "description": "Extracted and edited Vietnamese math theory notes"
+        },
+        "resultImageUrl": {
+          "type": "string",
+          "maxLength": 500000,
+          "description": "Compressed JPEG Data URL of the Gemini-generated infographic image"
+        },
+        "authorUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the user who created this group board document"
+        },
+        "lastEditorUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the last verified user who updated this group board"
+        },
+        "lastEditorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display label of the last editor (non-PII)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": [
+        "groupNumber",
+        "title",
+        "groupInput",
+        "theoryText",
+        "resultImageUrl",
+        "authorUid",
+        "lastEditorUid",
+        "lastEditorName",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/classroomGroups/{groupId}": {
+      "schema": {
+        "$ref": "#/entities/ClassroomGroup"
+      },
+      "description": "Shared classroom posters and theory prompts for groups 1, 2, 4, and 5"
+    }
+  }
+}

@@ -1,24 +1,51 @@
 import React, { useEffect, useRef, useState } from "react";
 import { toPng } from "html-to-image";
 import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  type User,
+} from "firebase/auth";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from "firebase/firestore";
+import {
   AlertCircle,
   Camera,
   Check,
   CheckCircle2,
   ClipboardPaste,
+  CloudUpload,
   Copy,
   Download,
   ExternalLink,
   FileText,
   ImagePlus,
   Loader2,
+  LogIn,
+  LogOut,
   RotateCcw,
   ScanText,
   Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
-import { compressImageDataUrl } from "../utils/imageCompress";
+import {
+  auth,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  OperationType,
+} from "../firebase";
+import {
+  compressDataUrlForFirestore,
+  compressImageDataUrl,
+} from "../utils/imageCompress";
 
 const SAMPLE_THEORY_TEXT = `I. KHÁI NIỆM VECTƠ TRONG KHÔNG GIAN
 
@@ -81,6 +108,8 @@ interface GroupWorkshopState {
   groupInput: string;
   customPrompt: string | null;
   generatedInfographicUrl: string | null;
+  lastEditorName?: string;
+  isDirty?: boolean;
 }
 
 function formatStandardPrompt(
@@ -130,12 +159,18 @@ export const TabTheoryInfographic: React.FC = () => {
           groupInput: String(i),
           customPrompt: null,
           generatedInfographicUrl: null,
+          lastEditorName: "",
+          isDirty: false,
         };
       }
       return init;
     }
   );
 
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSavingCloud, setIsSavingCloud] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
@@ -146,6 +181,60 @@ export const TabTheoryInfographic: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resultUploadInputRef = useRef<HTMLInputElement | null>(null);
   const exportFrameRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setAuthReady(true);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsubs = THEORY_GROUPS.map((num) => {
+      const docPath = `classroomGroups/group_${num}`;
+      const docRef = doc(db, "classroomGroups", `group_${num}`);
+      return onSnapshot(
+        docRef,
+        (snap) => {
+          if (!snap.exists()) return;
+          const d = snap.data() as {
+            title?: string;
+            groupInput?: string;
+            theoryText?: string;
+            resultImageUrl?: string;
+            lastEditorName?: string;
+          };
+          setGroups((prev) => {
+            const existing = prev[num];
+            return {
+              ...prev,
+              [num]: {
+                ...existing,
+                title: d.title ?? existing.title,
+                groupInput: d.groupInput ?? existing.groupInput,
+                theoryText: d.theoryText ?? existing.theoryText,
+                generatedInfographicUrl: d.resultImageUrl
+                  ? d.resultImageUrl
+                  : null,
+                lastEditorName: d.lastEditorName ?? existing.lastEditorName,
+                customPrompt: null,
+                isDirty: false,
+              },
+            };
+          });
+        },
+        (err) => {
+          // Log silently on background snapshot read without crashing UI
+          console.warn(`Firestore snapshot (${docPath}):`, err.message);
+        }
+      );
+    });
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, []);
 
   const current = groups[activeGroup];
 
@@ -168,11 +257,119 @@ export const TabTheoryInfographic: React.FC = () => {
     }));
   };
 
+  const handleGoogleSignIn = async (): Promise<User | null> => {
+    setErrorMsg(null);
+    setIsSigningIn(true);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      setUser(cred.user);
+      setStatusMsg(
+        `Đã đăng nhập (${cred.user.displayName || "Thành viên 12A7"}) — ảnh và nội dung giờ tự động đồng bộ cho cả lớp!`
+      );
+      return cred.user;
+    } catch (err: unknown) {
+      const code =
+        typeof err === "object" && err !== null && "code" in err
+          ? String((err as { code?: string }).code)
+          : "";
+      if (code === "auth/unauthorized-domain") {
+        setErrorMsg(
+          `Tên miền "${window.location.hostname}" chưa được cấp phép trong Firebase Auth. Thầy vào Firebase Console → Authentication → Settings → Authorized domains để thêm "${window.location.hostname}".`
+        );
+      } else if (code !== "auth/popup-closed-by-user") {
+        setErrorMsg(
+          err instanceof Error
+            ? `Không thể đăng nhập Google: ${err.message}`
+            : "Lỗi đăng nhập Google."
+        );
+      }
+      return null;
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    await signOut(auth);
+    setStatusMsg("Đã đăng xuất khỏi tài khoản đồng bộ.");
+  };
+
+  const saveGroupToFirestore = async (
+    groupNum: number,
+    stateToSave: GroupWorkshopState,
+    activeUser?: User | null
+  ): Promise<boolean> => {
+    const editor = activeUser ?? auth.currentUser;
+    if (!editor) return false;
+
+    const docId = `group_${groupNum}`;
+    const docPath = `classroomGroups/${docId}`;
+    const docRef = doc(db, "classroomGroups", docId);
+
+    setIsSavingCloud(true);
+    try {
+      const safeImage = stateToSave.generatedInfographicUrl
+        ? await compressDataUrlForFirestore(
+            stateToSave.generatedInfographicUrl,
+            460_000
+          )
+        : "";
+
+      const payloadCommon = {
+        title: (stateToSave.title || "").trim().slice(0, 200),
+        groupInput:
+          (stateToSave.groupInput || String(groupNum)).trim().slice(0, 50) ||
+          String(groupNum),
+        theoryText: (stateToSave.theoryText || "").slice(0, 15000),
+        resultImageUrl: safeImage,
+        lastEditorUid: editor.uid,
+        lastEditorName:
+          (editor.displayName || "Thành viên 12A7").trim().slice(0, 80) ||
+          "Thành viên 12A7",
+        updatedAt: serverTimestamp(),
+      };
+
+      const existingSnap = await getDoc(docRef);
+      if (existingSnap.exists()) {
+        await updateDoc(docRef, payloadCommon);
+      } else {
+        await setDoc(docRef, {
+          groupNumber: groupNum,
+          ...payloadCommon,
+          authorUid: editor.uid,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      setGroups((prev) => ({
+        ...prev,
+        [groupNum]: {
+          ...prev[groupNum],
+          generatedInfographicUrl: safeImage || null,
+          isDirty: false,
+        },
+      }));
+      return true;
+    } catch (err: unknown) {
+      try {
+        handleFirestoreError(err, OperationType.WRITE, docPath);
+      } catch (wrappedErr: unknown) {
+        setErrorMsg(
+          "Không thể lưu lên Bảng chung Firebase. Vui lòng kiểm tra kết nối mạng hoặc quyền đăng nhập Google."
+        );
+        console.error(wrappedErr);
+      }
+      return false;
+    } finally {
+      setIsSavingCloud(false);
+    }
+  };
+
   const handleImageFile = async (file: File) => {
     setErrorMsg(null);
     setStatusMsg(null);
     try {
-      const compressed = await compressImageDataUrl(file, 1280, 0.84);
+      const compressed = await compressImageDataUrl(file, 1152, 0.8);
       updateCurrent({
         uploadedImageUrl: compressed,
         uploadedFileName: file.name,
@@ -226,12 +423,38 @@ export const TabTheoryInfographic: React.FC = () => {
         }),
       });
 
-      const data = (await resp.json()) as {
+      const rawText = await resp.text();
+      let data: {
         extractedText?: string;
         suggestedTitle?: string;
         finalPrompt?: string;
         error?: string;
-      };
+      } = {};
+
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          if (resp.status === 404) {
+            throw new Error(
+              "Không tìm thấy API /api/rewrite-image-prompt (404). Hãy đảm bảo đã push thư mục api/ và vercel.json lên Vercel."
+            );
+          }
+          if (resp.status === 413) {
+            throw new Error(
+              "Dung lượng ảnh vượt quá giới hạn 4.5MB của Vercel. Vui lòng chọn ảnh nhẹ hơn hoặc chụp lại."
+            );
+          }
+          if (resp.status === 504) {
+            throw new Error(
+              "Máy chủ xử lý quá thời gian chờ (504). Vui lòng bấm thử lại lần nữa."
+            );
+          }
+          throw new Error(
+            `Lỗi máy chủ (${resp.status}). Vui lòng kiểm tra biến GEMINI_API_KEY trên Vercel.`
+          );
+        }
+      }
 
       if (!resp.ok || !data.extractedText || !data.finalPrompt) {
         throw new Error(
@@ -239,15 +462,21 @@ export const TabTheoryInfographic: React.FC = () => {
         );
       }
 
-      updateCurrent({
+      const nextState: GroupWorkshopState = {
+        ...current,
         theoryText: data.extractedText,
         title: current.title.trim() || data.suggestedTitle || "",
         customPrompt: null,
-      });
+      };
+      updateCurrent(nextState);
+
+      if (auth.currentUser) {
+        await saveGroupToFirestore(activeGroup, nextState);
+      }
 
       setStatusMsg(
         readImageFirst
-          ? "Gemini đã đọc ảnh và viết lại xong Prompt chuẩn! Bấm 'Copy Prompt' hoặc 'Copy Prompt & Mở Gemini' để dán tạo ảnh ngay."
+          ? "Gemini đã đọc ảnh và viết lại xong Prompt chuẩn! Bấm 'Copy Prompt' hoặc 'Đồng bộ Prompt' để Nhóm 3, 6 tạo ảnh."
           : "Gemini đã biên tập lại nội dung gọn đẹp và cập nhật Prompt sẵn sàng Copy!"
       );
     } catch (err: unknown) {
@@ -285,20 +514,37 @@ export const TabTheoryInfographic: React.FC = () => {
 
   const loadGeminiResultBlob = (blob: Blob) => {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       if (typeof reader.result === "string") {
+        const compressed = await compressDataUrlForFirestore(
+          reader.result,
+          460_000
+        );
+        const updatedState: GroupWorkshopState = {
+          ...groups[activeGroup],
+          generatedInfographicUrl: compressed,
+          isDirty: !auth.currentUser,
+        };
+
         setGroups((prev) => ({
           ...prev,
-          [activeGroup]: {
-            ...prev[activeGroup],
-            generatedInfographicUrl: reader.result as string,
-          },
+          [activeGroup]: updatedState,
         }));
         setShowSharpFooterOverlay(false);
         setErrorMsg(null);
-        setStatusMsg(
-          `Đã dán ảnh Infographic từ Gemini vào khung trình chiếu của Nhóm ${activeGroup}!`
-        );
+
+        if (auth.currentUser) {
+          const ok = await saveGroupToFirestore(activeGroup, updatedState);
+          if (ok) {
+            setStatusMsg(
+              `Đã lưu và đồng bộ ảnh của Nhóm ${activeGroup} lên Bảng chung! Mọi thiết bị khác đều có thể xem ngay.`
+            );
+          }
+        } else {
+          setStatusMsg(
+            `Ảnh đã hiện trên máy bạn. Bấm nút "Đăng nhập Google & Lưu lên Bảng chung" bên dưới để cả lớp cùng xem!`
+          );
+        }
       }
     };
     reader.onerror = () => {
@@ -398,17 +644,51 @@ export const TabTheoryInfographic: React.FC = () => {
 
   return (
     <section className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:py-8">
-      {/* Page Intro */}
-      <div className="mb-6 border-b border-slate-200 pb-5">
-        <p className="text-xs font-semibold tracking-wide text-emerald-700">
-          Nhóm 1, 2, 4, 5 tổng hợp nội dung &amp; xuất Prompt · Nhóm 3 &amp; 6 nhận Prompt để tạo ảnh Gemini
-        </p>
-        <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl text-balance">
-          Tổng ôn kiến thức chương: Đọc ảnh &amp; Viết Prompt chuẩn Gemini
-        </h1>
-        <p className="mt-1.5 max-w-3xl text-sm text-slate-600">
-          Chọn tab nhỏ của nhóm (Nhóm 1, 2, 4, 5), tải ảnh bài ghi thảo luận để Gemini đọc và viết lại thành Prompt hoàn chỉnh, sau đó Copy chuyển sang Nhóm 3 &amp; 6 dán vào Gemini tạo ảnh.
-        </p>
+      {/* Page Intro + Classroom Sync Auth Bar */}
+      <div className="mb-6 flex flex-col gap-4 border-b border-slate-200 pb-5 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs font-semibold tracking-wide text-emerald-700">
+            Nhóm 1, 2, 4, 5 tổng hợp nội dung &amp; xuất Prompt · Nhóm 3 &amp; 6 tạo ảnh &amp; đồng bộ lên bảng chung
+          </p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl text-balance">
+            Tổng ôn kiến thức chương: Đọc ảnh &amp; Viết Prompt chuẩn Gemini
+          </h1>
+          <p className="mt-1.5 max-w-3xl text-sm text-slate-600">
+            Chọn tab nhỏ của nhóm, tải ảnh bài ghi để Gemini đọc và viết lại Prompt. Ảnh kết quả khi dán vào và đăng nhập Google sẽ tự động đồng bộ tức thì cho giáo viên và cả lớp.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {authReady && user ? (
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs">
+              <span className="font-semibold text-emerald-900 max-w-[160px] truncate">
+                {user.displayName || "Thành viên 12A7"}
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleGoogleSignOut()}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                <LogOut className="h-3 w-3" />
+                Đăng xuất
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleGoogleSignIn()}
+              disabled={!authReady || isSigningIn}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2.5 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-60 cursor-pointer"
+            >
+              {isSigningIn ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <LogIn className="h-3.5 w-3.5 text-amber-300" />
+              )}
+              <span>Đăng nhập Google để đồng bộ lớp</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 4 Sub-tabs for Groups 1, 2, 4, 5 */}
@@ -769,6 +1049,38 @@ export const TabTheoryInfographic: React.FC = () => {
               </a>
             </div>
 
+            <button
+              type="button"
+              onClick={async () => {
+                const authed = user ?? (await handleGoogleSignIn());
+                if (authed) {
+                  const ok = await saveGroupToFirestore(
+                    activeGroup,
+                    current,
+                    authed
+                  );
+                  if (ok) {
+                    setStatusMsg(
+                      `Đã đồng bộ nội dung & Prompt của Nhóm ${activeGroup} lên Bảng chung để Nhóm 3, 6 copy tạo ảnh!`
+                    );
+                  }
+                }
+              }}
+              disabled={isSavingCloud || isSigningIn}
+              className="mt-2.5 flex min-h-[40px] w-full items-center justify-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50/70 px-4 py-2 text-xs font-bold text-emerald-900 transition-colors hover:bg-emerald-100 disabled:opacity-60 cursor-pointer"
+            >
+              {isSavingCloud ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <CloudUpload className="h-3.5 w-3.5 text-emerald-700" />
+              )}
+              <span>
+                {user
+                  ? "Đồng bộ Prompt & Nội dung lên Bảng chung cho Nhóm 3, 6"
+                  : "Đăng nhập Google & Đồng bộ Prompt cho Nhóm 3, 6"}
+              </span>
+            </button>
+
             {errorMsg && (
               <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
                 <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
@@ -789,39 +1101,97 @@ export const TabTheoryInfographic: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
               <div>
                 <span className="text-xs font-semibold text-emerald-700">
-                  Trình chiếu lớp 12A7 (16:9)
+                  Trình chiếu lớp 12A7 (16:9 · Đồng bộ thời gian thực)
                 </span>
                 <h3 className="text-base font-bold text-slate-900">
-                  Dán / Lưu ảnh từ Gemini cho Nhóm {current.groupInput || activeGroup}
+                  Ảnh kết quả Nhóm {current.groupInput || activeGroup}
+                  {current.lastEditorName ? (
+                    <span className="ml-2 text-xs font-normal text-slate-500">
+                      (Cập nhật bởi {current.lastEditorName})
+                    </span>
+                  ) : null}
                 </h3>
               </div>
 
-              {current.generatedInfographicUrl && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowSharpFooterOverlay((v) => !v)}
-                    className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-                  >
-                    {showSharpFooterOverlay
-                      ? "Đang ghép khung chữ chuẩn dấu"
-                      : "Ghép khung chữ chuẩn dấu"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadCompositePng}
-                    disabled={isExporting}
-                    className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
-                  >
-                    {isExporting ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
+              <div className="flex flex-wrap items-center gap-2">
+                {current.generatedInfographicUrl && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const authed = user ?? (await handleGoogleSignIn());
+                        if (authed) {
+                          const ok = await saveGroupToFirestore(
+                            activeGroup,
+                            current,
+                            authed
+                          );
+                          if (ok) {
+                            setStatusMsg(
+                              `Đã đồng bộ ảnh & nội dung Nhóm ${activeGroup} lên Bảng chung cho cả lớp!`
+                            );
+                          }
+                        }
+                      }}
+                      disabled={isSavingCloud || isSigningIn}
+                      className="flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-60 cursor-pointer"
+                    >
+                      {isSavingCloud ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <CloudUpload className="h-3.5 w-3.5" />
+                      )}
+                      {user
+                        ? "Lưu lên Bảng chung"
+                        : "Đăng nhập & Lưu cho cả lớp"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowSharpFooterOverlay((v) => !v)}
+                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                    >
+                      {showSharpFooterOverlay
+                        ? "Tắt khung chữ phủ"
+                        : "Ghép khung chữ"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDownloadCompositePng}
+                      disabled={isExporting}
+                      className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
+                    >
+                      {isExporting ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5" />
+                      )}
+                      Tải PNG
+                    </button>
+
+                    {user && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const cleared: GroupWorkshopState = {
+                            ...current,
+                            generatedInfographicUrl: null,
+                          };
+                          updateCurrent({ generatedInfographicUrl: null });
+                          await saveGroupToFirestore(activeGroup, cleared);
+                          setStatusMsg(
+                            `Đã xóa ảnh kết quả của Nhóm ${activeGroup} trên Bảng chung.`
+                          );
+                        }}
+                        className="rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 cursor-pointer"
+                      >
+                        Xóa ảnh
+                      </button>
                     )}
-                    Tải PNG 16:9
-                  </button>
-                </div>
-              )}
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="mt-4">
