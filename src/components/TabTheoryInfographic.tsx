@@ -29,11 +29,15 @@ import {
   Loader2,
   LogIn,
   LogOut,
+  Maximize2,
   RotateCcw,
   ScanText,
   Sparkles,
   Trash2,
   Upload,
+  X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
   auth,
@@ -177,10 +181,24 @@ export const TabTheoryInfographic: React.FC = () => {
   const [showSharpFooterOverlay, setShowSharpFooterOverlay] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{
+    src: string;
+    title: string;
+  } | null>(null);
+  const [zoomIndex, setZoomIndex] = useState<number>(1);
+  const [isDraggingPan, setIsDraggingPan] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resultUploadInputRef = useRef<HTMLInputElement | null>(null);
   const exportFrameRef = useRef<HTMLDivElement | null>(null);
+  const lightboxScrollRef = useRef<HTMLDivElement | null>(null);
+  const panOriginRef = useRef<{
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+    moved: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (firebaseUser) => {
@@ -256,6 +274,39 @@ export const TabTheoryInfographic: React.FC = () => {
       },
     }));
   };
+
+  const ZOOM_STEPS = [0.75, 1, 1.5, 2, 2.5, 3, 4] as const;
+  const ZOOM_WIDTH_CLASSES: Record<number, string> = {
+    0: "w-[75vw] sm:w-[75%] max-w-none h-auto",
+    1: "max-h-full max-w-full object-contain",
+    2: "w-[150vw] sm:w-[150%] max-w-none h-auto",
+    3: "w-[200vw] sm:w-[200%] max-w-none h-auto",
+    4: "w-[250vw] sm:w-[250%] max-w-none h-auto",
+    5: "w-[300vw] sm:w-[300%] max-w-none h-auto",
+    6: "w-[400vw] sm:w-[400%] max-w-none h-auto",
+  };
+
+  const openLightbox = (src: string, title: string) => {
+    setZoomIndex(1);
+    setLightboxImage({ src, title });
+  };
+
+  useEffect(() => {
+    if (!lightboxImage) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setLightboxImage(null);
+      } else if (e.key === "+" || e.key === "=") {
+        setZoomIndex((idx) => Math.min(idx + 1, ZOOM_STEPS.length - 1));
+      } else if (e.key === "-" || e.key === "_") {
+        setZoomIndex((idx) => Math.max(idx - 1, 0));
+      } else if (e.key === "0") {
+        setZoomIndex(1);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [lightboxImage]);
 
   const handleGoogleSignIn = async (): Promise<User | null> => {
     setErrorMsg(null);
@@ -794,13 +845,37 @@ export const TabTheoryInfographic: React.FC = () => {
             >
               {current.uploadedImageUrl ? (
                 <div className="space-y-3">
-                  <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-slate-950">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() =>
+                      openLightbox(
+                        current.uploadedImageUrl!,
+                        `Ảnh thảo luận · Nhóm ${activeGroup}`
+                      )
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openLightbox(
+                          current.uploadedImageUrl!,
+                          `Ảnh thảo luận · Nhóm ${activeGroup}`
+                        );
+                      }
+                    }}
+                    title="Nhấn để phóng to & zoom lớn"
+                    className="group relative cursor-zoom-in overflow-hidden rounded-xl border border-slate-200 bg-slate-950"
+                  >
                     <img
                       src={current.uploadedImageUrl}
                       alt={`Ảnh thảo luận Nhóm ${activeGroup}`}
                       referrerPolicy="no-referrer"
-                      className="max-h-64 w-full object-contain mx-auto"
+                      className="max-h-64 w-full object-contain mx-auto transition-transform duration-200 group-hover:scale-[1.01]"
                     />
+                    <span className="pointer-events-none absolute bottom-2.5 right-2.5 inline-flex items-center gap-1.5 rounded-lg bg-slate-900/85 px-2.5 py-1 text-[11px] font-semibold text-white shadow-md">
+                      <ZoomIn className="h-3.5 w-3.5 text-amber-300" />
+                      Nhấn để phóng to
+                    </span>
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="truncate text-xs text-slate-500 max-w-[180px]">
@@ -1158,6 +1233,20 @@ export const TabTheoryInfographic: React.FC = () => {
 
                     <button
                       type="button"
+                      onClick={() =>
+                        openLightbox(
+                          current.generatedInfographicUrl!,
+                          `Infographic kết quả · Nhóm ${current.groupInput || activeGroup}`
+                        )
+                      }
+                      className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 cursor-pointer"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      Phóng to
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={handleDownloadCompositePng}
                       disabled={isExporting}
                       className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
@@ -1197,16 +1286,37 @@ export const TabTheoryInfographic: React.FC = () => {
             <div className="mt-4">
               {current.generatedInfographicUrl ? (
                 <div
-                  ref={exportFrameRef}
-                  style={{ backgroundColor: "#123524" }}
-                  className="relative aspect-video w-full overflow-hidden rounded-xl border border-emerald-900 shadow-md"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() =>
+                    openLightbox(
+                      current.generatedInfographicUrl!,
+                      `Infographic kết quả · Nhóm ${current.groupInput || activeGroup}`
+                    )
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openLightbox(
+                        current.generatedInfographicUrl!,
+                        `Infographic kết quả · Nhóm ${current.groupInput || activeGroup}`
+                      );
+                    }
+                  }}
+                  title="Nhấn để phóng to toàn màn hình & zoom lớn"
+                  className="group relative cursor-zoom-in"
                 >
-                  <img
-                    src={current.generatedInfographicUrl}
-                    alt={`Infographic bảng xanh Nhóm ${activeGroup}`}
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-contain"
-                  />
+                  <div
+                    ref={exportFrameRef}
+                    style={{ backgroundColor: "#123524" }}
+                    className="relative aspect-video w-full overflow-hidden rounded-xl border border-emerald-900 shadow-md"
+                  >
+                    <img
+                      src={current.generatedInfographicUrl}
+                      alt={`Infographic bảng xanh Nhóm ${activeGroup}`}
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-contain transition-transform duration-200 group-hover:scale-[1.01]"
+                    />
 
                   {showSharpFooterOverlay && (
                     <>
@@ -1244,6 +1354,11 @@ export const TabTheoryInfographic: React.FC = () => {
                       </div>
                     </>
                   )}
+                  </div>
+                  <span className="pointer-events-none absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-900/85 px-2.5 py-1 text-[11px] font-semibold text-white shadow-md">
+                    <ZoomIn className="h-3.5 w-3.5 text-amber-300" />
+                    Nhấn để phóng to
+                  </span>
                 </div>
               ) : (
                 <div className="flex aspect-video w-full flex-col items-center justify-center rounded-xl border border-emerald-900/30 bg-[#123524] p-6 text-center text-emerald-100">
@@ -1285,6 +1400,154 @@ export const TabTheoryInfographic: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Fullscreen Image Zoom Lightbox */}
+      {lightboxImage && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightboxImage.title}
+          className="fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-xs"
+        >
+          {/* Top Zoom Control Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/90 px-4 py-3 text-white">
+            <div className="min-w-0">
+              <h4 className="truncate text-sm font-bold text-white">
+                {lightboxImage.title}
+              </h4>
+              <p className="text-[11px] text-slate-400">
+                Nhấn đúp vào ảnh để phóng to nhanh · Giữ chuột kéo để di chuyển vùng xem · Esc để đóng
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setZoomIndex((idx) => Math.max(idx - 1, 0))}
+                disabled={zoomIndex === 0}
+                title="Thu nhỏ (-)"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-40 cursor-pointer"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+                Thu nhỏ
+              </button>
+
+              <span className="min-w-[54px] text-center text-xs font-bold text-amber-300">
+                {Math.round(ZOOM_STEPS[zoomIndex] * 100)}%
+              </span>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setZoomIndex((idx) => Math.min(idx + 1, ZOOM_STEPS.length - 1))
+                }
+                disabled={zoomIndex === ZOOM_STEPS.length - 1}
+                title="Phóng lớn (+)"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-40 cursor-pointer"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+                Phóng lớn
+              </button>
+
+              <div className="hidden sm:flex items-center gap-1 ml-1">
+                {[
+                  { label: "Vừa màn hình", idx: 1 },
+                  { label: "200%", idx: 3 },
+                  { label: "300%", idx: 5 },
+                  { label: "400%", idx: 6 },
+                ].map((preset) => (
+                  <button
+                    key={preset.idx}
+                    type="button"
+                    onClick={() => setZoomIndex(preset.idx)}
+                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
+                      zoomIndex === preset.idx
+                        ? "bg-emerald-600 text-white"
+                        : "border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="ml-2 inline-flex items-center gap-1 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-500 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+                Đóng
+              </button>
+            </div>
+          </div>
+
+          {/* Scrollable & Drag-to-Pan Canvas */}
+          <div
+            ref={lightboxScrollRef}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !panOriginRef.current?.moved) {
+                setLightboxImage(null);
+              }
+            }}
+            onMouseDown={(e) => {
+              if (zoomIndex <= 1 || !lightboxScrollRef.current) return;
+              panOriginRef.current = {
+                startX: e.clientX,
+                startY: e.clientY,
+                scrollLeft: lightboxScrollRef.current.scrollLeft,
+                scrollTop: lightboxScrollRef.current.scrollTop,
+                moved: false,
+              };
+              setIsDraggingPan(true);
+            }}
+            onMouseMove={(e) => {
+              if (!panOriginRef.current || !lightboxScrollRef.current) return;
+              const dx = e.clientX - panOriginRef.current.startX;
+              const dy = e.clientY - panOriginRef.current.startY;
+              if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+                panOriginRef.current.moved = true;
+              }
+              lightboxScrollRef.current.scrollLeft =
+                panOriginRef.current.scrollLeft - dx;
+              lightboxScrollRef.current.scrollTop =
+                panOriginRef.current.scrollTop - dy;
+            }}
+            onMouseUp={() => {
+              setIsDraggingPan(false);
+              window.setTimeout(() => {
+                panOriginRef.current = null;
+              }, 0);
+            }}
+            onMouseLeave={() => {
+              setIsDraggingPan(false);
+              panOriginRef.current = null;
+            }}
+            className={`flex-1 overflow-auto p-4 sm:p-8 ${
+              zoomIndex === 1 ? "flex items-center justify-center" : ""
+            } ${
+              zoomIndex > 1
+                ? isDraggingPan
+                  ? "cursor-grabbing select-none"
+                  : "cursor-grab"
+                : ""
+            }`}
+          >
+            <img
+              src={lightboxImage.src}
+              alt={lightboxImage.title}
+              referrerPolicy="no-referrer"
+              draggable={false}
+              onDoubleClick={() =>
+                setZoomIndex((idx) => (idx === 1 ? 4 : 1))
+              }
+              className={`mx-auto rounded-lg shadow-2xl transition-all duration-150 ${
+                ZOOM_WIDTH_CLASSES[zoomIndex] || ZOOM_WIDTH_CLASSES[1]
+              }`}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 };
