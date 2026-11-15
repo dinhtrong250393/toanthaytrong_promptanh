@@ -1,0 +1,6 @@
+{
+  "name": "Oxyz 12A7 — Bài tập cuối chương II",
+  "description": "Ứng dụng EdTech tương tác Toán 12 (Kết nối tri thức) lớp 12A7: Ghép cặp Vectơ-Tọa độ, Xưởng Thẻ Ghi Nhớ AI và Mô phỏng 3D Three.js.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
